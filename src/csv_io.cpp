@@ -76,7 +76,7 @@ void SaveOutputsToCsv(const std::string& path, const EstimatorOutputs& outputs) 
         throw std::runtime_error("Failed to open output csv: " + path);
     }
 
-    output << "timestamp_s,p_yield,p_go,p_hesitate,accepted_gap_s,aggressiveness,response_delay_s,delta_ttc_s,delta_ttc_rate,ego_commit_score,obj_stop_proximity_score\n";
+    output << "timestamp_s,p_yield,p_go,p_hesitate,accepted_gap_s,aggressiveness,yield_deceleration_mps2,required_yield_deceleration_mps2,yield_feasibility,yield_deceleration_excess_mps2,delta_ttc_s,delta_ttc_rate,ego_commit_score,obj_stop_proximity_score\n";
     for (const auto& row : outputs) {
         output << row.timestamp_s << ','
                << row.mode_probabilities[0] << ','
@@ -84,7 +84,10 @@ void SaveOutputsToCsv(const std::string& path, const EstimatorOutputs& outputs) 
                << row.mode_probabilities[2] << ','
                << row.parameters.accepted_gap_s << ','
                << row.parameters.aggressiveness << ','
-               << row.parameters.response_delay_s << ','
+               << row.parameters.yield_deceleration_mps2 << ','
+               << row.required_yield_deceleration_mps2 << ','
+               << row.yield_feasibility << ','
+               << row.yield_deceleration_excess_mps2 << ','
                << row.features.delta_time_to_conflict_s << ','
                << row.features.delta_time_rate << ','
                << row.features.ego_commit_score << ','

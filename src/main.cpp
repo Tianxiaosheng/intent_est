@@ -18,7 +18,7 @@ void PrintUsage(const char* executable) {
 
 int main(int argc, char** argv) {
     try {
-        const std::string input_path = argc > 1 ? argv[1] : "data/sample_observations.csv";
+        const std::string input_path = argc > 1 ? argv[1] : "data/sample_observations_2.csv";
         const std::string output_path = argc > 2 ? argv[2] : "output/sample_outputs.csv";
 
         if (argc > 3) {
@@ -46,7 +46,7 @@ int main(int argc, char** argv) {
         std::cout << "Output: " << std::filesystem::absolute(output_path) << "\n\n";
 
         std::cout << std::fixed << std::setprecision(3);
-        std::cout << "timestamp  p_yield  p_go    p_hes    gap_s   aggr    delay_s\n";
+        std::cout << "timestamp  p_yield  p_go    p_hes    gap_s   aggr   yld_dec\n";
         for (std::size_t index = 0; index < outputs.size(); ++index) {
             if (index % 5 != 0 && index + 1 != outputs.size()) {
                 continue;
@@ -58,7 +58,7 @@ int main(int argc, char** argv) {
                       << std::setw(7) << row.mode_probabilities[2] << "  "
                       << std::setw(6) << row.parameters.accepted_gap_s << "  "
                       << std::setw(6) << row.parameters.aggressiveness << "  "
-                      << std::setw(7) << row.parameters.response_delay_s << '\n';
+                      << std::setw(8) << row.parameters.yield_deceleration_mps2 << '\n';
         }
 
         return 0;

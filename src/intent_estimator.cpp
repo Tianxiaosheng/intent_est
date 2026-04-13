@@ -17,6 +17,18 @@ std::size_t ModeIndex(HiddenMode mode) {
     return static_cast<std::size_t>(mode);
 }
 
+double ComputeRequiredYieldDeceleration(const Observation& observation,
+                                        const DerivedFeatures& features,
+                                        double accepted_gap_s) {
+    const double target_obj_ttc_s = std::max(features.ego_time_to_conflict_s + accepted_gap_s, 0.5);
+    const double obj_distance_to_conflict_m = std::max(observation.obj_distance_to_conflict_m, 0.5);
+    const double obj_speed_mps = std::max(std::abs(observation.obj_speed_mps), kMinSpeedMps);
+    const double required_acceleration =
+        2.0 * (obj_distance_to_conflict_m - obj_speed_mps * target_obj_ttc_s) /
+        (target_obj_ttc_s * target_obj_ttc_s);
+    return std::min(0.0, required_acceleration);
+}
+
 }  // namespace
 
 IntentEstimator::IntentEstimator(EstimatorConfig config)
@@ -64,7 +76,7 @@ void IntentEstimator::InitializeParticles() {
 
     std::uniform_real_distribution<double> gap_distribution(0.9, 2.2);
     std::uniform_real_distribution<double> aggressiveness_distribution(0.2, 0.8);
-    std::uniform_real_distribution<double> delay_distribution(0.2, 0.8);
+    std::uniform_real_distribution<double> yield_deceleration_distribution(-2.2, -0.8);
     std::uniform_int_distribution<int> mode_distribution(0, static_cast<int>(kModeCount) - 1);
 
     const double initial_weight = 1.0 / static_cast<double>(config_.particle_count);
@@ -72,7 +84,7 @@ void IntentEstimator::InitializeParticles() {
         particle.mode = static_cast<HiddenMode>(mode_distribution(rng_));
         particle.parameters.accepted_gap_s = gap_distribution(rng_);
         particle.parameters.aggressiveness = aggressiveness_distribution(rng_);
-        particle.parameters.response_delay_s = delay_distribution(rng_);
+        particle.parameters.yield_deceleration_mps2 = yield_deceleration_distribution(rng_);
         particle.weight = initial_weight;
     }
 }
@@ -118,27 +130,58 @@ std::array<double, kModeCount> IntentEstimator::ComputeTransitionProbabilities(
 
     const double gap_margin = features.delta_time_to_conflict_s - parameters.accepted_gap_s;
     const double hesitation_window = 1.0 - Clamp(std::abs(gap_margin) / 1.5, 0.0, 1.0);
+    const double yield_deceleration_strength =
+        Clamp((-parameters.yield_deceleration_mps2 - 0.5) / 2.5, 0.0, 1.0);
+    const double required_yield_deceleration_mps2 =
+        ComputeRequiredYieldDeceleration(observation, features, parameters.accepted_gap_s);
+    const double yield_deceleration_excess_mps2 = std::max(
+        0.0,
+        std::abs(required_yield_deceleration_mps2) - std::abs(parameters.yield_deceleration_mps2));
+    const double yield_feasibility = Sigmoid(
+        (std::abs(parameters.yield_deceleration_mps2) - std::abs(required_yield_deceleration_mps2)) /
+        config_.yield_feasibility_softness_mps2);
+    const double yield_infeasibility = 1.0 - yield_feasibility;
+    const double min_time_to_conflict_s =
+        std::min(features.ego_time_to_conflict_s, features.obj_time_to_conflict_s);
+    const double interaction_activation =
+        Clamp((config_.yield_brake_onset_ttc_s + 0.8 - min_time_to_conflict_s) /
+                  (config_.yield_brake_ramp_ttc_s + 0.8),
+              0.0,
+              1.0);
+    const double coasting_yield_bonus = (observation.object_has_yield_sign ? 0.35 : 0.0)
+        * (1.0 - interaction_activation)
+        * (1.0 - features.obj_accel_score)
+        * (1.0 - 0.5 * features.obj_decel_score);
     const auto& row = kBaseTransitionBias[ModeIndex(previous_mode)];
 
     double score_yield = row[ModeIndex(HiddenMode::Yield)]
-        + 1.40 * gap_margin
+        + (0.45 + 0.95 * interaction_activation) * gap_margin
         - 1.10 * parameters.aggressiveness
+        + 0.45 * yield_deceleration_strength
         + 0.90 * features.obj_decel_score
         + 0.70 * features.ego_commit_score
+        + coasting_yield_bonus
+        - 1.45 * yield_infeasibility
+        - 0.55 * Clamp(yield_deceleration_excess_mps2 / 1.2, 0.0, 1.0)
         + (observation.object_has_yield_sign ? 0.40 : 0.0)
         - (observation.object_has_priority ? 0.80 : 0.0);
 
     double score_go = row[ModeIndex(HiddenMode::Go)]
-        - 1.30 * gap_margin
+        - (0.40 + 0.90 * interaction_activation) * gap_margin
         + 1.10 * parameters.aggressiveness
+        - 0.25 * yield_deceleration_strength
         + 0.80 * features.obj_accel_score
         + (observation.object_has_priority ? 0.70 : 0.0)
         - (observation.object_has_yield_sign ? 0.45 : 0.0)
+        - 0.20 * coasting_yield_bonus
+        + 0.75 * yield_infeasibility
         - 0.40 * features.ego_commit_score;
 
     double score_hesitate = row[ModeIndex(HiddenMode::Hesitate)]
         + 1.10 * hesitation_window
-        + 0.35 * parameters.response_delay_s
+        + 0.40 * (1.0 - interaction_activation)
+        + 0.25 * coasting_yield_bonus
+        + 0.45 * yield_infeasibility
         - 0.25 * std::abs(observation.obj_acc_mps2)
         + 0.15 * (1.0 - std::abs(features.delta_time_rate));
 
@@ -163,7 +206,7 @@ HiddenMode IntentEstimator::SampleMode(const std::array<double, kModeCount>& pro
 ContinuousParameters IntentEstimator::PropagateParameters(const ContinuousParameters& parameters) {
     std::normal_distribution<double> gap_noise(0.0, config_.process_noise_gap);
     std::normal_distribution<double> aggressiveness_noise(0.0, config_.process_noise_aggressiveness);
-    std::normal_distribution<double> delay_noise(0.0, config_.process_noise_delay);
+    std::normal_distribution<double> yield_deceleration_noise(0.0, config_.process_noise_yield_deceleration);
 
     ContinuousParameters propagated = parameters;
     propagated.accepted_gap_s = Clamp(parameters.accepted_gap_s + gap_noise(rng_),
@@ -172,9 +215,9 @@ ContinuousParameters IntentEstimator::PropagateParameters(const ContinuousParame
     propagated.aggressiveness = Clamp(parameters.aggressiveness + aggressiveness_noise(rng_),
                                       config_.aggressiveness_min,
                                       config_.aggressiveness_max);
-    propagated.response_delay_s = Clamp(parameters.response_delay_s + delay_noise(rng_),
-                                        config_.delay_min_s,
-                                        config_.delay_max_s);
+    propagated.yield_deceleration_mps2 = Clamp(parameters.yield_deceleration_mps2 + yield_deceleration_noise(rng_),
+                                               config_.yield_deceleration_min_mps2,
+                                               config_.yield_deceleration_max_mps2);
     return propagated;
 }
 
@@ -184,6 +227,12 @@ double IntentEstimator::ComputeObservationLikelihood(HiddenMode mode,
                                                      const DerivedFeatures& features) const {
     const double expected_acc = ExpectedAcceleration(mode, parameters, observation, features);
     const double expected_delta_rate = ExpectedDeltaTimeRate(mode, parameters, observation, features);
+    const double required_yield_deceleration_mps2 =
+        ComputeRequiredYieldDeceleration(observation, features, parameters.accepted_gap_s);
+    const double yield_feasibility = Sigmoid(
+        (std::abs(parameters.yield_deceleration_mps2) - std::abs(required_yield_deceleration_mps2)) /
+        config_.yield_feasibility_softness_mps2);
+    const double yield_infeasibility = 1.0 - yield_feasibility;
 
     double likelihood = GaussianPdf(observation.obj_acc_mps2 - expected_acc, config_.sigma_acc) *
                         GaussianPdf(features.delta_time_rate - expected_delta_rate, config_.sigma_delta_rate);
@@ -191,16 +240,19 @@ double IntentEstimator::ComputeObservationLikelihood(HiddenMode mode,
     const double gap_margin = features.delta_time_to_conflict_s - parameters.accepted_gap_s;
     if (mode == HiddenMode::Yield) {
         likelihood *= 1.0 + 0.25 * Clamp((gap_margin + 0.5) / 2.5, 0.0, 1.0);
+        likelihood *= 0.08 + 0.92 * yield_feasibility;
         if (observation.object_has_yield_sign) {
             likelihood *= 1.10;
         }
     } else if (mode == HiddenMode::Go) {
         likelihood *= 1.0 + 0.25 * Clamp((parameters.accepted_gap_s - gap_margin) / 2.5, 0.0, 1.0);
+        likelihood *= 1.0 + 0.28 * yield_infeasibility;
         if (observation.object_has_priority) {
             likelihood *= 1.10;
         }
     } else {
         likelihood *= 1.0 + 0.15 * (1.0 - Clamp(std::abs(gap_margin) / 1.5, 0.0, 1.0));
+        likelihood *= 1.0 + 0.15 * yield_infeasibility;
     }
 
     return std::max(likelihood, kTinyLikelihood);
@@ -211,20 +263,34 @@ double IntentEstimator::ExpectedAcceleration(HiddenMode mode,
                                              const Observation& observation,
                                              const DerivedFeatures& features) const {
     const double delta = features.delta_time_to_conflict_s;
+    const double yield_deceleration_strength =
+        Clamp((-parameters.yield_deceleration_mps2 - 0.5) / 2.5, 0.0, 1.0);
+    const double yield_brake_activation =
+        Clamp((config_.yield_brake_onset_ttc_s - features.obj_time_to_conflict_s) /
+                  config_.yield_brake_ramp_ttc_s,
+              0.0,
+              1.0);
 
     if (mode == HiddenMode::Yield) {
         const double brake_need = Clamp((parameters.accepted_gap_s - delta + 0.25) /
                                             std::max(parameters.accepted_gap_s + 0.25, 0.6),
                                         0.0,
                                         2.0);
-        double expected = -0.15 - 1.80 * brake_need
-            - 0.80 * features.ego_commit_score * (1.0 - 0.30 * parameters.aggressiveness)
-            - 0.35 * features.obj_stop_proximity_score;
+        const double yield_progress = Clamp(0.75 * yield_brake_activation
+                                                + 0.20 * features.obj_stop_proximity_score
+                                                + 0.20 * features.obj_decel_score
+                                                + 0.10 * yield_brake_activation * brake_need,
+                                            0.0,
+                                            1.0);
+        double expected = yield_progress * parameters.yield_deceleration_mps2
+            - 0.20 * yield_brake_activation * features.ego_commit_score * (1.0 - 0.30 * parameters.aggressiveness)
+            - 0.10 * features.obj_stop_proximity_score
+            - 0.04 * yield_brake_activation * (1.0 - yield_deceleration_strength);
         if (observation.object_has_priority) {
             expected += 0.45;
         }
         if (observation.object_has_yield_sign) {
-            expected -= 0.35;
+            expected -= 0.08 * yield_brake_activation;
         }
         return Clamp(expected, -4.0, 1.0);
     }
@@ -253,11 +319,21 @@ double IntentEstimator::ExpectedDeltaTimeRate(HiddenMode mode,
                                               const ContinuousParameters& parameters,
                                               const Observation& observation,
                                               const DerivedFeatures& features) const {
+    const double yield_deceleration_strength =
+        Clamp((-parameters.yield_deceleration_mps2 - 0.5) / 2.5, 0.0, 1.0);
+    const double yield_brake_activation =
+        Clamp((config_.yield_brake_onset_ttc_s - features.obj_time_to_conflict_s) /
+                  config_.yield_brake_ramp_ttc_s,
+              0.0,
+              1.0);
+
     if (mode == HiddenMode::Yield) {
-        return 0.10
-            + 0.20 * (1.0 - parameters.aggressiveness)
-            + 0.18 * features.ego_commit_score
-            + 0.08 * features.obj_decel_score
+        return 0.02
+            + 0.06 * yield_brake_activation
+            + 0.16 * (1.0 - parameters.aggressiveness) * yield_brake_activation
+            + 0.14 * yield_deceleration_strength * yield_brake_activation
+            + 0.08 * features.ego_commit_score * yield_brake_activation
+            + 0.10 * features.obj_decel_score
             - (observation.object_has_priority ? 0.06 : 0.0);
     }
 
@@ -334,8 +410,17 @@ EstimatorOutput IntentEstimator::BuildOutput(const Observation& observation,
         output.mode_probabilities[ModeIndex(particle.mode)] += particle.weight;
         output.parameters.accepted_gap_s += particle.weight * particle.parameters.accepted_gap_s;
         output.parameters.aggressiveness += particle.weight * particle.parameters.aggressiveness;
-        output.parameters.response_delay_s += particle.weight * particle.parameters.response_delay_s;
+        output.parameters.yield_deceleration_mps2 += particle.weight * particle.parameters.yield_deceleration_mps2;
     }
+
+    output.required_yield_deceleration_mps2 =
+        ComputeRequiredYieldDeceleration(observation, features, output.parameters.accepted_gap_s);
+    output.yield_deceleration_excess_mps2 = std::max(
+        0.0,
+        std::abs(output.required_yield_deceleration_mps2) - std::abs(output.parameters.yield_deceleration_mps2));
+    output.yield_feasibility = Sigmoid(
+        (std::abs(output.parameters.yield_deceleration_mps2) - std::abs(output.required_yield_deceleration_mps2)) /
+        config_.yield_feasibility_softness_mps2);
 
     return output;
 }

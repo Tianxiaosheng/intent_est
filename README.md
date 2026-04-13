@@ -3,7 +3,7 @@
 一个面向自动驾驶路口交互场景的 C++ demo。输入自车和障碍物的时序观测，在线输出：
 
 - 障碍物 `yield / go / hesitate` 三个隐状态概率
-- 连续隐参数：`accepted_gap_s / aggressiveness / response_delay_s`
+- 连续隐参数：`accepted_gap_s / aggressiveness / yield_deceleration_mps2`
 
 本工程强调：
 
@@ -57,7 +57,7 @@ timestamp_s,dt_s,ego_distance_to_conflict_m,ego_speed_mps,ego_acc_mps2,obj_dista
 ## 输出 CSV 格式
 
 ```text
-timestamp_s,p_yield,p_go,p_hesitate,accepted_gap_s,aggressiveness,response_delay_s,delta_ttc_s,delta_ttc_rate,ego_commit_score,obj_stop_proximity_score
+timestamp_s,p_yield,p_go,p_hesitate,accepted_gap_s,aggressiveness,yield_deceleration_mps2,required_yield_deceleration_mps2,yield_feasibility,yield_deceleration_excess_mps2,delta_ttc_s,delta_ttc_rate,ego_commit_score,obj_stop_proximity_score
 ```
 
 ## 注意

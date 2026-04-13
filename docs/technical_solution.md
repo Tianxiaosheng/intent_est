@@ -13,7 +13,7 @@
 2. 目标车连续隐参数：
    - `accepted_gap_s`：最小接受间隙
    - `aggressiveness`：激进度
-   - `response_delay_s`：响应时延
+   - `yield_deceleration_mps2`：目标车选择让行时的平顺减速度
 
 ### 1.2 明确不做的事情
 
@@ -44,7 +44,7 @@
 
 - `accepted_gap_s`：目标车愿意接受的最小时距阈值
 - `aggressiveness`：目标车在冲突临近时保持推进的倾向
-- `response_delay_s`：目标车对交互局面的响应滞后
+- `yield_deceleration_mps2`：目标车决定让行后通常采用的平顺减速度
 
 ### 2.3 在线估计思路
 
@@ -84,8 +84,11 @@
 - `p_hesitate`
 - `accepted_gap_s`
 - `aggressiveness`
-- `response_delay_s`
+- `yield_deceleration_mps2`
 - 若干便于调试的派生特征：
+   - `required_yield_deceleration_mps2`
+   - `yield_feasibility`
+   - `yield_deceleration_excess_mps2`
   - `delta_ttc_s`
   - `delta_ttc_rate`
   - `ego_commit_score`
@@ -106,14 +109,14 @@ m_t \in \{Y, G, H\}
 连续参数：
 
 \[
-\theta_t = [g_t, \alpha_t, \tau_t]^\top
+	heta_t = [g_t, \alpha_t, a^y_t]^\top
 \]
 
 其中：
 
 - \(g_t\)：accepted gap
 - \(\alpha_t\)：aggressiveness
-- \(\tau_t\)：response delay
+- \(a^y_t\)：yield deceleration
 
 ### 4.2 派生交互特征
 
@@ -154,13 +157,14 @@ P(m_t = k | m_{t-1}, \theta_{t-1}, s_t)
 - 上一模式保持偏置
 - 当前 \(\Delta T_t - g_t\) 的裕度
 - 激进度 \(\alpha_t\)
+- 让行减速度强度
 - 目标车当前加/减速证据
 - 自车承诺程度
 - 路权和让行标志
 
 直觉上：
 
-- gap 裕度大 + 目标减速 + 自车承诺高 → `yield` 概率升高
+- gap 裕度大 + 目标减速 + 让行减速度更强 + 自车承诺高 → `yield` 概率升高
 - gap 裕度小 + 目标激进 + 有优先权 → `go` 概率升高
 - gap 处于临界带且纵向动作不明确 → `hesitate` 概率升高
 
@@ -180,7 +184,7 @@ w_t \sim \mathcal{N}(0, Q)
 
 - `accepted_gap_s` \(\in [0.6, 3.0]\)
 - `aggressiveness` \(\in [0, 1]\)
-- `response_delay_s` \(\in [0.1, 1.5]\)
+- `yield_deceleration_mps2` \(\in [-3.0, -0.5]\)
 
 ### 4.5 模式条件观测似然
 
@@ -199,8 +203,29 @@ p(o_t | m_t, \theta_t)
 #### 4.5.1 `yield` 模式的期望响应
 
 - 目标车应表现出减速
+- 更贴近“先匀速观察、后进入平顺匀减速”的工程风格
 - `delta_ttc` 应逐步变大
+- 平顺让行减速度越大，预测减速越明显
 - 自车越接近承诺区、目标越靠近停止线，减速越明显
+
+当前工程实现中，`yield` 模式不是一进入就立即强制制动，而是增加了基于目标车 `obj_time_to_conflict_s` 的减速启动门控：
+
+- 离冲突点还较远时，允许 `yield` 模式下保持近似匀速观望
+- 接近设定的 braking onset TTC 后，期望加速度逐步收敛到 `yield_deceleration_mps2`
+- 因此该模式更适合表达“已经决定让行，但会以平顺方式开始减速”的行为
+
+此外，工程实现里还引入了一个轻量的让行可行性约束：
+
+- 根据当前目标车距离、速度以及 `accepted_gap_s`，近似反推“若要让 ego 先过，目标车当前至少需要提供多大常值减速度”
+- 将这个近似所需减速度与粒子的 `yield_deceleration_mps2` 做比较
+- 当所需减速度超过该粒子可接受的平顺让行减速度时，`yield` 的转移分数和观测似然都会被连续压低
+- 且超出的幅度越大，`yield` 越不容易成立
+
+为便于调试，该约束相关量也会随帧输出：
+
+- `required_yield_deceleration_mps2`：当前近似所需让行减速度
+- `yield_feasibility`：由所需减速度与隐参数比较得到的平滑可行性分数
+- `yield_deceleration_excess_mps2`：所需减速度超过隐参数能力的超出量
 
 #### 4.5.2 `go` 模式的期望响应
 
@@ -235,7 +260,7 @@ p(x) = \mathcal{N}(x; \mu, \sigma^2)
 - 当前时距差
 - 目标加减速
 - 路权/让行规则
-- 已估计的 gap/aggressiveness/delay
+- 已估计的 gap/aggressiveness/yield deceleration
 
 ### 5.3 复杂度低
 
@@ -332,7 +357,7 @@ p(x) = \mathcal{N}(x; \mu, \sigma^2)
 
 - `process_noise_gap = 0.05`
 - `process_noise_aggressiveness = 0.03`
-- `process_noise_delay = 0.02`
+- `process_noise_yield_deceleration = 0.08`
 
 噪声太小：参数僵化，不容易自适应。
 噪声太大：参数抖动，后验不稳定。
@@ -343,6 +368,19 @@ p(x) = \mathcal{N}(x; \mu, \sigma^2)
 - `sigma_delta_rate = 0.25`
 
 如果目标加速度观测噪声大，应适当放宽 `sigma_acc`。
+
+### 8.4 让行减速启动参数
+
+- `yield_brake_onset_ttc_s = 2.8`
+- `yield_brake_ramp_ttc_s = 1.2`
+
+它们控制 `yield` 模式从“匀速观察”过渡到“平顺匀减速”的启动时机与过渡宽度。
+
+### 8.5 让行可行性平滑参数
+
+- `yield_feasibility_softness_mps2 = 0.25`
+
+该参数越小，`required_yield_deceleration_mps2` 一旦超过 `yield_deceleration_mps2`，`yield` 概率下降越快；越大则下降越平滑。
 
 ---
 

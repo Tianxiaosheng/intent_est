@@ -14,15 +14,20 @@ struct EstimatorConfig {
     double gap_max_s = 3.0;
     double aggressiveness_min = 0.0;
     double aggressiveness_max = 1.0;
-    double delay_min_s = 0.1;
-    double delay_max_s = 1.5;
+    double yield_deceleration_min_mps2 = -2.0;
+    double yield_deceleration_max_mps2 = -0.5;
 
     double process_noise_gap = 0.05;
     double process_noise_aggressiveness = 0.03;
-    double process_noise_delay = 0.02;
+    double process_noise_yield_deceleration = 0.08;
 
     double sigma_acc = 0.60;
     double sigma_delta_rate = 0.25;
+
+    double yield_feasibility_softness_mps2 = 0.25;
+
+    double yield_brake_onset_ttc_s = 2.8;
+    double yield_brake_ramp_ttc_s = 1.2;
 
     double ego_commit_distance_m = 8.0;
     double ego_commit_speed_mps = 1.5;

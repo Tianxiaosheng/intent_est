@@ -56,7 +56,7 @@ struct DerivedFeatures {
 struct ContinuousParameters {
     double accepted_gap_s = 1.5;
     double aggressiveness = 0.5;
-    double response_delay_s = 0.4;
+    double yield_deceleration_mps2 = -1.0;
 };
 
 struct EstimatorOutput {
@@ -64,6 +64,9 @@ struct EstimatorOutput {
     std::array<double, kModeCount> mode_probabilities{};
     ContinuousParameters parameters{};
     DerivedFeatures features{};
+    double required_yield_deceleration_mps2 = 0.0;
+    double yield_feasibility = 1.0;
+    double yield_deceleration_excess_mps2 = 0.0;
 };
 
 using ObservationSequence = std::vector<Observation>;
